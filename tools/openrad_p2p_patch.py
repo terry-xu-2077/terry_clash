@@ -5,6 +5,19 @@ from pathlib import Path
 
 def apply(source: Path, replace_once) -> None:
     replace_once(
+        source / "src/runtime.rs",
+        '''                                && eligible.contains(&p.peer.rid)
+                                && !workers.contains_key(&p.peer.rid)''',
+        '''                                && eligible.contains(&p.peer.rid)
+                                && (pending.contains(&p.peer.rid)
+                                    || !cfg!(feature = "router-headless")
+                                    || std::env::var("OPENRAD_PASSIVE_SECONDS").ok()
+                                        .and_then(|value| value.parse::<u64>().ok())
+                                        .filter(|seconds| *seconds <= 60)
+                                        .map_or(true, |seconds| started.elapsed().as_secs() >= seconds))
+                                && !workers.contains_key(&p.peer.rid)''',
+    )
+    replace_once(
         source / "Cargo.toml",
         "[target.'cfg(windows)'.dependencies]\n",
         "[target.'cfg(unix)'.dependencies]\nsocket2 = { version = \"0.6\", features = [\"all\"] }\n\n[target.'cfg(windows)'.dependencies]\n",
