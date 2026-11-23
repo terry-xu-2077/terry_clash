@@ -30,7 +30,7 @@ jobs:
         env:
           CARGO_BUILD_JOBS: 2
         run: |
-          cargo +1.95.0 test --locked -p openrad-client --bin openrad --features router-headless
+          cargo +1.95.0 test --locked -p openrad-client --bin openrad --features router-headless --target x86_64-unknown-linux-musl
           cargo +1.95.0 build --release --locked -p openrad-client --bin openrad --features router-headless --target x86_64-unknown-linux-musl
           file target/x86_64-unknown-linux-musl/release/openrad
           ! readelf -l target/x86_64-unknown-linux-musl/release/openrad | grep -q INTERP

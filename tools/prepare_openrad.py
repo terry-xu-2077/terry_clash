@@ -49,6 +49,9 @@ def prepare(source: Path) -> None:
         "msg.msg_controllen = size;": "msg.msg_controllen = size as _;",
         "libc::CMSG_LEN((count * std::mem::size_of::<RawFd>()) as u32) as usize;":
             "libc::CMSG_LEN((count * std::mem::size_of::<RawFd>()) as u32) as _;",
+        ", TUNGETIFF,": ", TUNGETIFF as _,",
+        ", TUNSETIFF,": ", TUNSETIFF as _,",
+        ", TUNSETOWNER,": ", TUNSETOWNER as _,",
     }
     for rel in ("src/daemon.rs", "src/platform/linux.rs", "src/udp.rs"):
         path = source / rel
