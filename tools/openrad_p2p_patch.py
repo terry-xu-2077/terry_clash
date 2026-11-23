@@ -124,6 +124,7 @@ fn connect_socket_from_port(
 ''',
         '''        let route_ip = coord.stream.socket.local_addr()?.ip();
         let rendezvous_port = coord.stream.socket.local_addr()?.port();
+        let mut own_tcp_candidates = Vec::new();
 ''',
     )
     replace_once(
@@ -135,6 +136,7 @@ fn connect_socket_from_port(
                             let listener = Framed::listen_shared(rendezvous_port)?;
                             listener.set_nonblocking(true)?;
                             let addresses = crate::udp::local_candidates(route_ip, rendezvous_port)?;
+                            own_tcp_candidates = addresses.clone();
                             coord.send(&advertise_tcp(cid, &addresses)?)?;
                             report.attempts.push(serde_json::json!({
                                 "phase":"outgoing_tcp_listener", "port":rendezvous_port,
@@ -175,4 +177,27 @@ fn connect_socket_from_port(
                             })?;
                         }
                         if !force_relay {''',
+    )
+    replace_once(
+        peer,
+        '''                            coord.send(&request_tcp_candidates(cid))?;
+''',
+        '''                            if !cfg!(all(feature = "router-headless", target_os = "linux")) {
+                                coord.send(&request_tcp_candidates(cid))?;
+                            }
+''',
+    )
+    replace_once(
+        peer,
+        '''                            Ok((candidates, exclusions)) => {
+                                if operation == 6 {''',
+        '''                            Ok((candidates, exclusions)) => {
+                                // The coordinator may echo our new advertisement
+                                // before delivering the remote member's candidates.
+                                if operation == 6 && candidates.iter().any(|candidate|
+                                    own_tcp_candidates.contains(&candidate.endpoint)) {
+                                    report.attempts.push(serde_json::json!({"phase":"own_tcp_advertisement_echo_ignored"}));
+                                    continue;
+                                }
+                                if operation == 6 {''',
     )
