@@ -66,3 +66,25 @@ OpenRad 2.4.5 固定提交 `c7111577ffdfb4ab48ef4ba108ddbcf3ca07795c`。已处�
 服务名为 `openrad-mvp`，网络资源由 `network.sh` 管理。试验启动了独立 watchdog，未取消限时回滚；到期将停止实例并清理临时网络，保留安装的文件和独立身份。当前运行状态应实时查询，不能由本记录推断仍在线。
 
 停止试验按顺序执行 `/etc/init.d/openrad-mvp stop` 和 `/usr/libexec/openrad-mvp/network.sh down`。清理操作不重启或停止 TerryClash，不清空 fw4，也不删除 Radmin 身份。后续重新运行可复用该身份与网络成员关系。
+
+
+## 2026-11-23 11:45–11:47 停止代理后的 60 秒测试
+
+用户已手动停止 TerryClash。现场确认服务 inactive、UCI enabled=0、inet terryclash 表不存在，SSH 经 br-lan 直连。使用路由器原有候选过滤版本（SHA256 e03eff1f7cbeb00c8b73e4f2589dc95be01bb1164eb4df42fb454494b2649f26），未部署新二进制。
+
+恢复独立命名空间、resolver 和主网络比较模式。因 TerryClash 表已不存在，临时网络启动脚本省略向该表插入绕过规则；其余保护不变。路由器不含 nohup，首次启动在检查清理计时器时中止并自动回滚；随后用已有 setsid 启动 150 秒独立清理保护。实例启动后移除了其 TAP 自动添加的组播和全局广播路由。
+
+连续采样 60 秒：目标外网成员开始为 Connecting，15、30、45、60 秒均为 Connected / Relay / Authenticated Relay · Outgoing，未观察到 Direct TCP 或 Direct UDP。初始握手期间 3 次 ICMP 全部超时；第 45 秒后 3 次全部成功，最小/平均/最大 359.322/361.052/364.190 ms。
+
+结论：本轮关闭 TerryClash 没有使当前 OpenRad 版本与指定外网成员建立 P2P；连通依赖 Radmin 中继。此结果不能排除其他版本或官方客户端的行为差异，后续应继续核查 OpenRad 协议协商与套接字实现。
+
+结束后停止 OpenRad 并执行 network.sh down：测试命名空间、TAP、独立 nft 表与 fw4 临时规则已清理；TerryClash 保持用户设定的停止状态，enabled=0；TerryClash、DHCP、防火墙配置 SHA256 均与本轮开始前一致，LAN SSH 路径正常。原始采样和诊断仅保存在被 Git 忽略的 dist/openrad 中，未上传。本轮未操作物理宿主机、外部客户端或光猫。
+
+
+## 2026-11-23 后续对照及完整清理
+
+最新状态以 [交接文档](HANDOFF_2026-11-23.md) 为准。此前“被动窗口未部署”和“停用对照未执行”只描述当时的拦截历史，本轮已继续完成这些实验。
+
+本轮验证官方客户端同一外网 IP 的双向 UDP 正常，OpenRad 打洞包单向发出无相应回包；被动窗口版本已部署并在外部持续 ping 时观察到认证 Incoming，但仍 Relay。改用随机 UDP 端口后，15/30/45/60 秒仍 Relay；TCP 补丁前的构建在 0/20/40/60 秒也仍 Relay。该早期构建没有直连优先窗口环境参数，属于组合对照，不能单独推断 TCP 补丁影响。目标外网 P2P 仍未实现。外网侧抓包与针对本地产生流量的 fullcone NAT 例外对照尚未实施。
+
+按用户要求，2026-11-23 15:14 完成全部路由器实验清理：移除 OpenRad 身份、所有历史二进制、服务/网络/恢复脚本、临时诊断、专用帐号与 sudo 权限、网络资源和实验安装的 13 个依赖包。身份已先备份到项目之外的用户私人目录，未提交。清理前 TerryClash 已重新运行，清理后继续正常运行，IPv4/IPv6/DNS 接管正常，三份当前配置 SHA256 均未变化。下一次必须重新部署；不要据旧记录认为路由器仍装有实验程序。
