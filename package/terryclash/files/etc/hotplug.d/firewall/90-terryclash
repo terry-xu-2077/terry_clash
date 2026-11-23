@@ -1,0 +1,5 @@
+#!/bin/sh
+[ "$ACTION" = reload ] || exit 0
+[ -s /etc/terryclash/run.yaml ] || exit 0
+uci -q get terryclash.main.enabled | grep -qx 1 || exit 0
+/usr/libexec/terryclash-firewall apply

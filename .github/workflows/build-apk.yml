@@ -1,0 +1,35 @@
+name: Build ImmortalWrt 25.12.2 APK
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'package/terryclash/**'
+      - '.github/workflows/build-apk.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SDK host dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential zstd rsync file python3 unzip
+      - name: Verify bundled Mihomo
+        run: echo '2763f5b414527f7baf6dc57e3f82f3ab561eedf34bfd7c2f2cde1f7e592efe06  package/terryclash/core/mihomo.gz' | sha256sum -c -
+      - name: Fetch exact ImmortalWrt SDK
+        run: |
+          curl -fL --retry 3 -o sdk.tar.zst 'https://downloads.immortalwrt.org/releases/25.12.2/targets/x86/64/immortalwrt-sdk-25.12.2-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst'
+          echo '4d4631f134c2f27215a91aa7ef5bf9a01ea96c2450d3b8a5c38048c32462ac60  sdk.tar.zst' | sha256sum -c -
+          mkdir sdk
+          tar --zstd -xf sdk.tar.zst --strip-components=1 -C sdk
+      - name: Build TerryClash APK
+        run: |
+          cp -a package/terryclash sdk/package/terryclash
+          cd sdk
+          make defconfig
+          make package/terryclash/compile V=s
+          find bin -name 'terryclash-*.apk' -print -quit | grep .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terryclash-immortalwrt-25.12.2-x86_64
+          path: sdk/bin/packages/**/terryclash-*.apk
+          if-no-files-found: error

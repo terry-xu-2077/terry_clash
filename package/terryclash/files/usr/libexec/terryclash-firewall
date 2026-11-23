@@ -1,0 +1,97 @@
+#!/bin/sh
+set -e
+. /lib/functions.sh
+mkdir -p /var/lock
+exec 9>/var/lock/terryclash-firewall.lock
+flock -x 9
+
+TABLE=terryclash
+MARK=0x71
+ROUTE_TABLE=171
+
+remove() {
+	nft delete table inet "$TABLE" 2>/dev/null || true
+	while ip -4 rule del fwmark "$MARK" lookup "$ROUTE_TABLE" 2>/dev/null; do :; done
+	ip -4 route flush table "$ROUTE_TABLE" 2>/dev/null || true
+	while ip -6 rule del fwmark "$MARK" lookup "$ROUTE_TABLE" 2>/dev/null; do :; done
+	ip -6 route flush table "$ROUTE_TABLE" 2>/dev/null || true
+}
+
+apply() {
+	remove
+	config_load terryclash
+	config_get device main lan_device br-lan
+	case "$device" in *[!a-zA-Z0-9_.:-]*|'') echo 'Invalid LAN device' >&2; return 1;; esac
+	# Separate table: one delete completely restores the original fw4 rules.
+	nft -f - <<EOF
+table inet $TABLE {
+ set node_ipv4 { type ipv4_addr; }
+ set node_ipv6 { type ipv6_addr; }
+ set client_proxy_ipv4 { type ipv4_addr; flags interval; auto-merge; }
+ set client_proxy_ipv6 { type ipv6_addr; flags interval; auto-merge; }
+ set client_direct_ipv4 { type ipv4_addr; flags interval; auto-merge; }
+ set client_direct_ipv6 { type ipv6_addr; flags interval; auto-merge; }
+ chain client_ipv4 { }
+ chain client_ipv6 { }
+ chain tcp_prerouting {
+  type nat hook prerouting priority dstnat; policy accept;
+  iifname "$device" meta nfproto ipv4 jump client_ipv4
+  iifname "$device" meta nfproto ipv4 ip daddr @node_ipv4 return
+  iifname "$device" meta nfproto ipv4 ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } return
+  iifname "$device" meta nfproto ipv4 meta l4proto tcp counter redirect to :7892
+ }
+ chain udp_prerouting {
+  type filter hook prerouting priority mangle; policy accept;
+  iifname "$device" meta nfproto ipv4 jump client_ipv4
+  iifname "$device" meta nfproto ipv4 ip daddr @node_ipv4 return
+  iifname "$device" meta nfproto ipv4 ip daddr { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } return
+  iifname "$device" meta nfproto ipv4 meta l4proto udp counter tproxy ip to :7893 meta mark set $MARK accept
+ }
+ chain ipv6_prerouting {
+  type filter hook prerouting priority mangle; policy accept;
+  iifname "$device" meta nfproto ipv6 jump client_ipv6
+  iifname "$device" meta nfproto ipv6 ip6 daddr @node_ipv6 return
+  iifname "$device" meta nfproto ipv6 ip6 daddr { ::/128, ::1/128, fc00::/7, fe80::/10, ff00::/8 } return
+  iifname "$device" meta nfproto ipv6 meta l4proto { tcp, udp } counter tproxy ip6 to :7893 meta mark set $MARK accept
+ }
+}
+EOF
+	for policy in proxy direct; do
+		for address in $(uci -q get "terryclash.main.lan_${policy}_ip" || true); do
+			case "$address" in
+				*:*) family=ipv6 ;;
+				*) family=ipv4 ;;
+			esac
+			nft add element inet "$TABLE" "client_${policy}_$family" "{ $address }"
+		done
+	done
+	nft add rule inet "$TABLE" client_ipv4 ip saddr @client_direct_ipv4 accept
+	nft add rule inet "$TABLE" client_ipv6 ip6 saddr @client_direct_ipv6 accept
+	if [ -n "$(uci -q get terryclash.main.lan_proxy_ip || true)" ]; then
+		nft add rule inet "$TABLE" client_ipv4 ip saddr != @client_proxy_ipv4 accept
+		nft add rule inet "$TABLE" client_ipv6 ip6 saddr != @client_proxy_ipv6 accept
+	fi
+	# A LAN Clash client must reach its upstream node directly. Capturing that
+	# connection again creates a nested proxy and can break the client's traffic.
+	if [ -s /etc/terryclash/run.yaml ]; then
+		for server in $( { yq -r '.proxies[]?.server' /etc/terryclash/run.yaml; uci -q get terryclash.main.bypass_node | tr ' ' '\n'; } | sort -u); do
+			case "$server" in
+				*[!0-9.]*|'') ;;
+				*) nft add element inet "$TABLE" node_ipv4 "{ $server }" 2>/dev/null || true ;;
+			esac
+			case "$server" in
+				*:*) nft add element inet "$TABLE" node_ipv6 "{ $server }" 2>/dev/null || true ;;
+			esac
+		done
+	fi
+	ip -4 route replace local 0.0.0.0/0 dev lo table "$ROUTE_TABLE"
+	ip -4 rule add fwmark "$MARK" lookup "$ROUTE_TABLE" priority 10071
+	ip -6 route replace local ::/0 dev lo table "$ROUTE_TABLE"
+	ip -6 rule add fwmark "$MARK" lookup "$ROUTE_TABLE" priority 10071
+}
+
+case "${1:-}" in
+	apply) apply ;;
+	remove) remove ;;
+	*) echo 'usage: terryclash-firewall apply|remove' >&2; exit 2 ;;
+esac

@@ -1,0 +1,48 @@
+{
+  "luci-app-terryclash": {
+    "description": "Manage TerryClash",
+    "read": {
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/libexec/terryclash": [
+          "exec"
+        ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "file": [
+          "exec",
+          "write"
+        ]
+      },
+      "file": {
+        "/usr/libexec/terryclash": [
+          "exec"
+        ],
+        "/tmp/terryclash-import.yaml": [
+          "write"
+        ],
+        "/tmp/terryclash-script.js": [
+          "write"
+        ],
+        "/tmp/terryclash-bypass-list.txt": [
+          "write"
+        ],
+        "/tmp/terryclash-bypass-import.yaml": [
+          "write"
+        ],
+        "/tmp/terryclash-lan-proxy.txt": [
+          "write"
+        ],
+        "/tmp/terryclash-lan-direct.txt": [
+          "write"
+        ]
+      }
+    }
+  }
+}

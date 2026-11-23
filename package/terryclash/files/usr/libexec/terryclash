@@ -1,0 +1,569 @@
+#!/bin/sh
+set -e
+
+. /lib/functions.sh
+. /usr/share/libubox/jshn.sh
+
+ROOT=/etc/terryclash
+SUBS=$ROOT/subscriptions
+RUN=$ROOT/run.yaml
+API=http://127.0.0.1:9090
+mkdir -p "$SUBS"
+STATE_BACKUP=
+SCRIPT_BACKUP=
+TEMP_FILES=
+cleanup() {
+	[ -z "$SCRIPT_BACKUP" ] || { cp "$SCRIPT_BACKUP" "$ROOT/global.js"; rm -f "$SCRIPT_BACKUP"; }
+	[ -z "$STATE_BACKUP" ] || { cp "$STATE_BACKUP" /etc/config/terryclash; rm -f "$STATE_BACKUP"; }
+	[ -z "$TEMP_FILES" ] || rm -f $TEMP_FILES
+}
+trap cleanup EXIT INT TERM
+begin_change() { STATE_BACKUP=$(mktemp /tmp/terryclash-uci.XXXXXX); cp /etc/config/terryclash "$STATE_BACKUP"; }
+end_change() { rm -f "$STATE_BACKUP"; STATE_BACKUP=; }
+new_section() {
+	kind=$1
+	section=$(uci add terryclash "$kind")
+	id="${kind}_$(date +%s)_$(hexdump -n 3 -v -e '1/1 "%02x"' /dev/urandom)"
+	uci rename "terryclash.$section=$id"
+	printf '%s' "$id"
+}
+urlencode() { for octet in $(printf '%s' "$1" | hexdump -v -e '1/1 "%02X "'); do printf '%%%s' "$octet"; done; }
+http_put() {
+	path=$1; body=$2
+	curl -fsS --max-time 5 -X PUT -H 'Content-Type: application/json' --data "$body" "$API$path" >/dev/null
+}
+wait_api() {
+	for attempt in 1 2 3 4 5 6 7 8 9 10; do
+		curl -fsS --max-time 1 "$API/configs" >/dev/null 2>&1 && return 0
+		sleep 1
+	done
+	return 1
+}
+section_index() {
+	position=0
+	for section in $(uci -X show terryclash | grep -E '^terryclash\.[^.]+=[^=]+$' | cut -d. -f2 | cut -d= -f1); do
+		[ "$section" = "$1" ] && { echo "$position"; return; }
+		position=$((position + 1))
+	done
+	return 1
+}
+
+ok() { json_init; json_add_boolean ok 1; json_add_string message "${1:-OK}"; json_dump; }
+fail() { json_init; json_add_boolean ok 0; json_add_string error "$1"; json_dump; exit 1; }
+valid_id() { case "$1" in *[!a-zA-Z0-9_]*|'') return 1;; esac; }
+api() { wget -qO- -T 4 --header 'Accept: application/json' "$API$1"; }
+test_config() { /usr/bin/mihomo -t -d "$ROOT" -f "$1" > /tmp/terryclash-check.log 2>&1 || { cat /tmp/terryclash-check.log >&2; return 1; }; }
+
+build() {
+	src=$1; dest=$2
+	[ -s "$src" ] || fail '配置文件为空'
+	yq -e 'tag == "!!map"' "$src" >/dev/null 2>&1 || fail '不是有效的 YAML 映射'
+	cp "$src" "$dest"
+	if [ "$(uci -q get terryclash.main.script_enabled)" = 1 ]; then
+		script_input=$(mktemp "$ROOT/.script-input.XXXXXX"); script_output=$(mktemp "$ROOT/.script-output.XXXXXX")
+		TEMP_FILES="$TEMP_FILES $script_input $script_output"
+		yq -o=json '.' "$src" > "$script_input"
+		timeout 10 qjs --memory-limit 33554432 -m /usr/libexec/terryclash-script.mjs "$ROOT/global.js" "$script_input" "$script_output" > /tmp/terryclash-script.log 2>&1 || fail "脚本执行失败: $(tail -c 800 /tmp/terryclash-script.log)"
+		yq -p=json -o=yaml '.' "$script_output" > "$dest"
+	fi
+	# Force the management API to loopback, and use fixed local transparent ports.
+	yq -i '."external-controller" = "127.0.0.1:9090" | .secret = "" | ."allow-lan" = true | ."redir-port" = 7892 | ."tproxy-port" = 7893 | .ipv6 = true' "$dest"
+	# dnsmasq keeps LAN names, while Mihomo resolves its upstream queries.
+	yq -i '.dns.enable = true | .dns.listen = "127.0.0.1:1053" | .dns.ipv6 = false' "$dest"
+	# Direct LAN clients need real DNS answers; fake IPs only work when captured.
+	if [ -n "$(uci -q get terryclash.main.lan_proxy_ip || true)$(uci -q get terryclash.main.lan_direct_ip || true)" ]; then
+		yq -i '.dns."enhanced-mode" = "redir-host"' "$dest"
+	fi
+	if ! yq -e '.dns.nameserver | length > 0' "$dest" >/dev/null 2>&1 || yq -e '.dns.nameserver[] | select(. == "system" or . == "127.0.0.1" or . == "127.0.0.1:53")' "$dest" >/dev/null 2>&1; then
+		yq -i '.dns.nameserver = ["https://dns.alidns.com/dns-query", "https://doh.pub/dns-query"]' "$dest"
+	fi
+	if ! yq -e '.dns."default-nameserver" | length > 0' "$dest" >/dev/null 2>&1 || yq -e '.dns."default-nameserver"[] | select(. == "system" or . == "127.0.0.1" or . == "127.0.0.1:53")' "$dest" >/dev/null 2>&1; then
+		yq -i '.dns."default-nameserver" = ["223.5.5.5", "119.29.29.29"]' "$dest"
+	fi
+	# REDIR/TPROXY receives destination IPs; sniff SNI/Host for domain rules.
+	yq -i '.sniffer.enable = true | .sniffer.sniff.HTTP.ports = (.sniffer.sniff.HTTP.ports // [80, "8080-8880"]) | .sniffer.sniff.HTTP."override-destination" = true | .sniffer.sniff.TLS.ports = (.sniffer.sniff.TLS.ports // [443, 8443]) | .sniffer.sniff.QUIC.ports = (.sniffer.sniff.QUIC.ports // [443, 8443])' "$dest"
+	mode=$(uci -q get terryclash.main.mode || echo rule)
+	MODE="$mode" yq -i '.mode = strenv(MODE)' "$dest"
+	json_init; json_add_array rules
+	config_load terryclash
+	config_foreach emit_rule rule
+	json_close_array
+	json_dump > "$ROOT/custom-rules.json"
+	yq -p=json -o=yaml '.rules' "$ROOT/custom-rules.json" > "$ROOT/custom-rules.yaml"
+	# Subscription nodes without UDP support must not send QUIC traffic DIRECT.
+	# Reject UDP/443 so browsers retry over TCP, which follows the proxy rules.
+	yq -i '.rules = (["AND,((NETWORK,UDP),(DST-PORT,443)),REJECT"] + load("/etc/terryclash/custom-rules.yaml") + (.rules // []))' "$dest"
+	test_config "$dest" || fail "Mihomo 校验失败: $(tail -n 3 /tmp/terryclash-check.log | tr '\n' ' ')"
+}
+
+emit_rule() {
+	local section=$1 type value target enabled
+	config_get type "$section" type
+	config_get value "$section" value
+	config_get target "$section" target
+	config_get enabled "$section" enabled 1
+	[ "$enabled" = 1 ] && json_add_string '' "$type,$value,$target"
+}
+
+apply_source() {
+	src=$1
+	candidate=$(mktemp "$ROOT/.candidate.XXXXXX")
+	TEMP_FILES="$TEMP_FILES $candidate"
+	build "$src" "$candidate"
+	if [ -f "$RUN" ]; then cp "$RUN" "$ROOT/run.previous.yaml"; fi
+	mv "$candidate" "$RUN"
+	if [ "$(uci -q get terryclash.main.enabled)" = 1 ]; then
+		if ! /etc/init.d/terryclash restart || ! wait_api; then
+			[ -f "$ROOT/run.previous.yaml" ] && cp "$ROOT/run.previous.yaml" "$RUN"
+			/etc/init.d/terryclash restart || true
+			fail '服务重启失败，已恢复上一个配置'
+		fi
+		/usr/libexec/terryclash-firewall apply
+	fi
+}
+
+refresh_config() {
+	active=$(uci -q get terryclash.main.active || true)
+	[ -n "$active" ] && [ -s "$SUBS/$active.yaml" ] || fail '找不到当前订阅，无法更新运行配置'
+	candidate=$(mktemp "$ROOT/.candidate.XXXXXX")
+	TEMP_FILES="$TEMP_FILES $candidate"
+	build "$SUBS/$active.yaml" "$candidate"
+	[ ! -f "$RUN" ] || cp "$RUN" "$ROOT/run.previous.yaml"
+	mv "$candidate" "$RUN"
+}
+
+list_subscriptions() {
+	json_init; json_add_array subscriptions
+	config_load terryclash
+	config_foreach emit_subscription subscription
+	json_close_array
+	json_add_string active "$(uci -q get terryclash.main.active || true)"
+	json_add_int update_interval "$(uci -q get terryclash.main.update_interval || echo 24)"
+	json_dump
+}
+
+emit_subscription() {
+	local section=$1 name url updated
+	config_get name "$section" name
+	config_get url "$section" url
+	config_get updated "$section" updated ''
+	json_add_object ''
+	json_add_string id "$section"
+	json_add_string name "$name"
+	json_add_string url "$url"
+	json_add_string updated "$updated"
+	json_close_object
+}
+
+emit_custom_rule() {
+	local section=$1 type value target
+	config_get type "$section" type
+	config_get value "$section" value
+	config_get target "$section" target
+	json_add_object ''
+	json_add_string id "$section"
+	json_add_string type "$type"
+	json_add_string value "$value"
+	json_add_string target "$target"
+	json_close_object
+}
+
+list_custom_rules() {
+	json_init; json_add_array rules
+	config_load terryclash
+	config_foreach emit_custom_rule rule
+	json_close_array; json_dump
+}
+
+bypass_list() {
+	json_init
+	json_add_string addresses "$(uci -q get terryclash.main.bypass_node | tr ' ' '\n')"
+	json_dump
+}
+
+lan_list() {
+	json_init
+	json_add_string proxy "$(uci -q get terryclash.main.lan_proxy_ip | tr ' ' '\n')"
+	json_add_string direct "$(uci -q get terryclash.main.lan_direct_ip | tr ' ' '\n')"
+	json_dump
+}
+
+save_lan() {
+	local kind input list check address family count proxy_list direct_list active
+	proxy_list=$(mktemp /tmp/terryclash-lan-proxy.XXXXXX)
+	direct_list=$(mktemp /tmp/terryclash-lan-direct.XXXXXX)
+	check=$(mktemp /tmp/terryclash-lan-check.XXXXXX)
+	TEMP_FILES="$TEMP_FILES $proxy_list $direct_list $check"
+	printf 'table inet tc_lan_check {\n set proxy_ipv4 { type ipv4_addr; flags interval; auto-merge; }\n set proxy_ipv6 { type ipv6_addr; flags interval; auto-merge; }\n set direct_ipv4 { type ipv4_addr; flags interval; auto-merge; }\n set direct_ipv6 { type ipv6_addr; flags interval; auto-merge; }\n}\n' > "$check"
+	for kind in proxy direct; do
+		input="/tmp/terryclash-lan-$kind.txt"
+		[ -f "$input" ] || fail '缺少局域网地址列表'
+		[ "$(wc -c < "$input")" -le 65536 ] || fail '地址列表不能超过 64 KiB'
+		case "$kind" in proxy) list=$proxy_list;; direct) list=$direct_list;; esac
+		tr -d '\r' < "$input" | sort -u > "$list"
+		count=0
+		while IFS= read -r address; do
+			[ -n "$address" ] || continue
+			case "$address" in *[!0-9a-fA-F:./]*) fail "无效局域网地址: $address";; esac
+			case "$address" in *:*) family=ipv6;; *.*) family=ipv4;; *) fail "无效局域网地址: $address";; esac
+			printf 'add element inet tc_lan_check %s_%s { %s }\n' "$kind" "$family" "$address" >> "$check"
+			count=$((count + 1))
+		done < "$list"
+		[ "$count" -le 1024 ] || fail '每份名单最多 1024 个地址'
+	done
+	nft -c -f "$check" >/dev/null 2>&1 || fail '名单含有无效 IP 或网段'
+	begin_change
+	uci -q delete terryclash.main.lan_proxy_ip || true
+	uci -q delete terryclash.main.lan_direct_ip || true
+	for kind in proxy direct; do
+		case "$kind" in proxy) list=$proxy_list;; direct) list=$direct_list;; esac
+		while IFS= read -r address; do
+			[ -z "$address" ] || uci add_list "terryclash.main.lan_${kind}_ip=$address"
+		done < "$list"
+	done
+	uci commit terryclash
+	active=$(uci -q get terryclash.main.active || true)
+	if [ -n "$active" ] && [ -s "$SUBS/$active.yaml" ]; then
+		if [ "$(uci -q get terryclash.main.enabled || true)" = 1 ]; then
+			apply_source "$SUBS/$active.yaml"
+		else
+			refresh_config
+		fi
+	fi
+	end_change
+	ok '局域网分流已保存'
+}
+
+save_bypass() {
+	input=$1
+	[ -f "$input" ] || fail '未找到直连地址列表'
+	[ "$(wc -c < "$input")" -le 65536 ] || fail '地址列表不能超过 64 KiB'
+	list=$(mktemp /tmp/terryclash-bypass-list.XXXXXX)
+	check=$(mktemp /tmp/terryclash-bypass-check.XXXXXX)
+	TEMP_FILES="$TEMP_FILES $list $check"
+	tr -d '\r' < "$input" | sort -u > "$list"
+	printf 'table inet tc_bypass_check {\n set ipv4 { type ipv4_addr; }\n set ipv6 { type ipv6_addr; }\n}\n' > "$check"
+	count=0
+	while IFS= read -r address; do
+		[ -n "$address" ] || continue
+		case "$address" in *[!0-9a-fA-F:.]*) fail "无效地址: $address";; esac
+		case "$address" in *:*) family=ipv6;; *.*) family=ipv4;; *) fail "无效地址: $address";; esac
+		printf 'add element inet tc_bypass_check %s { %s }\n' "$family" "$address" >> "$check"
+		count=$((count + 1))
+	done < "$list"
+	[ "$count" -le 1024 ] || fail '最多保存 1024 个地址'
+	nft -c -f "$check" >/dev/null 2>&1 || fail '地址列表含有无效 IP'
+	uci -q delete terryclash.main.bypass_node || true
+	while IFS= read -r address; do
+		[ -z "$address" ] || uci add_list "terryclash.main.bypass_node=$address"
+	done < "$list"
+	uci commit terryclash
+	if [ "$(uci -q get terryclash.main.enabled)" = 1 ]; then
+		/usr/libexec/terryclash-firewall apply || fail '直连地址已保存，但防火墙刷新失败'
+	fi
+	json_init; json_add_boolean ok 1; json_add_int count "$count"; json_dump
+}
+
+emit_probe() {
+	local section=$1 name url
+	config_get name "$section" name
+	config_get url "$section" url
+	json_add_object ''
+	json_add_string id "$section"
+	json_add_string name "$name"
+	json_add_string url "$url"
+	json_close_object
+}
+
+probe_list() {
+	local entry id rest name url
+	json_init; json_add_array probes
+	if [ "$(uci -q get terryclash.main.probes_initialized || true)" = 1 ]; then
+		config_load terryclash
+		config_foreach emit_probe probe
+	else
+		for entry in 'google|Google|https://www.google.com/generate_204' 'youtube|YouTube|https://www.youtube.com/' 'bilibili|哔哩哔哩|https://www.bilibili.com/'; do
+			id=${entry%%|*}; rest=${entry#*|}; name=${rest%%|*}; url=${rest#*|}
+			json_add_object ''
+			json_add_string id "probe_$id"
+			json_add_string name "$name"
+			json_add_string url "$url"
+			json_close_object
+		done
+	fi
+	json_close_array; json_dump
+}
+
+ensure_probes() {
+	local entry id rest name url
+	[ "$(uci -q get terryclash.main.probes_initialized || true)" != 1 ] || return 0
+	for entry in 'google|Google|https://www.google.com/generate_204' 'youtube|YouTube|https://www.youtube.com/' 'bilibili|哔哩哔哩|https://www.bilibili.com/'; do
+		id=${entry%%|*}; rest=${entry#*|}; name=${rest%%|*}; url=${rest#*|}
+		uci set "terryclash.probe_$id=probe"
+		uci set "terryclash.probe_$id.name=$name"
+		uci set "terryclash.probe_$id.url=$url"
+	done
+	uci set terryclash.main.probes_initialized=1
+	uci commit terryclash
+}
+
+probe_check() {
+	id=$1; valid_id "$id" || fail '无效站点 ID'
+	if [ "$(uci -q get terryclash.main.probes_initialized || true)" != 1 ]; then
+		case "$id" in
+			probe_google) url=https://www.google.com/generate_204 ;;
+			probe_youtube) url=https://www.youtube.com/ ;;
+			probe_bilibili) url=https://www.bilibili.com/ ;;
+			*) fail '站点不存在' ;;
+		esac
+	else
+		[ "$(uci -q get "terryclash.$id" || true)" = probe ] || fail '站点不存在'
+		url=$(uci -q get "terryclash.$id.url")
+	fi
+	pidof mihomo >/dev/null || fail 'Mihomo 未运行'
+	port=$(yq -r '.port // 7890' "$RUN")
+	case "$port" in *[!0-9]*|'') fail 'HTTP 代理端口无效';; esac
+	if result=$(curl -sS -I -L --max-redirs 3 --connect-timeout 4 --max-time 8 --noproxy '' -x "http://127.0.0.1:$port" -o /dev/null -w '%{http_code} %{time_total}' "$url" 2>/dev/null); then
+		code=${result%% *}; elapsed=${result#* }
+	else
+		code=000; elapsed=0
+	fi
+	json_init
+	case "$code" in 000) json_add_boolean reachable 0 ;; *) json_add_boolean reachable 1 ;; esac
+	json_add_int http_status "$code"
+	json_add_string elapsed_seconds "$elapsed"
+	json_dump
+}
+
+update_subscription() {
+	id=$1; valid_id "$id" || fail '无效订阅 ID'
+	url=$(uci -q get "terryclash.$id.url") || fail '订阅不存在'
+	case "$url" in https://*|http://*) ;; *) fail '仅支持 HTTP(S) 订阅';; esac
+	tmp=$(mktemp "$ROOT/.download.XXXXXX")
+	TEMP_FILES="$TEMP_FILES $tmp"
+	wget -q -T 25 -O "$tmp" "$url" || fail '订阅下载失败'
+	[ "$(wc -c < "$tmp")" -le 4194304 ] || fail '订阅超过 4 MiB'
+	if [ "$(uci -q get terryclash.main.active)" = "$id" ]; then apply_source "$tmp"; else
+		check=$(mktemp "$ROOT/.check.XXXXXX")
+		build "$tmp" "$check"
+		rm -f "$check"
+	fi
+	mv "$tmp" "$SUBS/$id.yaml"
+	uci set "terryclash.$id.updated=$(date -Iseconds)"
+	uci commit terryclash
+	ok '订阅已更新'
+}
+
+check_rule() {
+	type=$1; value=$2; target=$3
+	case "$type" in DOMAIN|DOMAIN-SUFFIX|DOMAIN-KEYWORD|IP-CIDR|GEOSITE|GEOIP|RULE-SET) ;; *) fail '不支持的规则类型';; esac
+	case "$value" in *','*|*'\n'*|'') fail '无效的规则内容';; esac
+	case "$target" in DIRECT|REJECT) return;; esac
+	active=$(uci -q get terryclash.main.active || true)
+	[ -n "$active" ] || fail '尚未选择订阅'
+	TARGET="$target" yq -e '.["proxy-groups"][] | select(.name == strenv(TARGET))' "$RUN" >/dev/null 2>&1 || fail '目标策略组不存在'
+	if [ "$type" = RULE-SET ]; then
+		VALUE="$value" yq -e '.["rule-providers"] | has(strenv(VALUE))' "$RUN" >/dev/null 2>&1 || fail 'Rule Provider 不存在'
+	fi
+}
+
+rules_json() {
+	[ -s "$RUN" ] || fail '尚未加载配置'
+	yq -o=json '{"rules": (.rules // []), "groups": ([.["proxy-groups"][]?.name] // [])}' "$RUN"
+}
+
+auto_one() {
+	local id=$1 url updated last
+	config_get url "$id" url
+	config_get updated "$id" updated ''
+	[ -n "$url" ] || return 0
+	last=$(date -d "$updated" +%s 2>/dev/null || echo 0)
+	[ $((now - last)) -lt $((interval * 3600)) ] || "$0" update "$id" >/dev/null 2>&1 || true
+}
+
+case "${1:-}" in
+	refresh-config) refresh_config ;;
+	status)
+		json_init
+		if pidof mihomo >/dev/null; then json_add_boolean running 1; else json_add_boolean running 0; fi
+		json_add_string mode "$(uci -q get terryclash.main.mode || echo rule)"
+		json_add_string active "$(uci -q get terryclash.main.active || true)"
+		json_add_boolean enabled "$(uci -q get terryclash.main.enabled || echo 0)"
+		if nft list chain inet terryclash tcp_prerouting 2>/dev/null | grep -Fq 'redirect to :7892'; then json_add_boolean capture_ipv4 1; else json_add_boolean capture_ipv4 0; fi
+		if nft list chain inet terryclash ipv6_prerouting 2>/dev/null | grep -Fq 'tproxy ip6 to :7893' && ip -6 rule show | grep -Eq 'fwmark 0x71 lookup 171'; then json_add_boolean capture_ipv6 1; else json_add_boolean capture_ipv6 0; fi
+		dns_servers=" $(uci -q get 'dhcp.@dnsmasq[0].server' || true) "
+		if [ "$(uci -q get 'dhcp.@dnsmasq[0].noresolv' || true)" = 1 ]; then
+			case "$dns_servers" in *' 127.0.0.1#1053 '*) json_add_boolean dns_forwarding 1 ;; *) json_add_boolean dns_forwarding 0 ;; esac
+		else
+			json_add_boolean dns_forwarding 0
+		fi
+		json_dump ;;
+	start|stop|restart)
+		case "$1" in start|restart) uci set terryclash.main.enabled=1; uci commit terryclash; /etc/init.d/terryclash enable;; stop) uci set terryclash.main.enabled=0; uci commit terryclash; /etc/init.d/terryclash disable;; esac
+		/etc/init.d/terryclash "$1"
+		if [ "$1" != stop ]; then
+			wait_api || { /etc/init.d/terryclash stop; fail 'Mihomo 未能启动'; }
+			/usr/libexec/terryclash-firewall apply || { /etc/init.d/terryclash stop; fail '透明代理规则应用失败'; }
+			/usr/libexec/terryclash-dns apply || { /etc/init.d/terryclash stop; fail 'DNS 接管失败，已恢复原配置'; }
+		fi
+		ok "$1" ;;
+	mode)
+		case "${2:-}" in rule|global|direct) ;; *) fail '无效模式';; esac
+		begin_change
+		uci set "terryclash.main.mode=$2"; uci commit terryclash
+		[ -s "$RUN" ] && apply_source "$SUBS/$(uci -q get terryclash.main.active).yaml"
+		end_change
+		ok '模式已切换' ;;
+	script-get)
+		json_init; json_add_string script "$(cat "$ROOT/global.js" 2>/dev/null || true)"; json_add_boolean enabled "$(uci -q get terryclash.main.script_enabled || echo 0)"; json_dump ;;
+	bypass-list) bypass_list ;;
+	lan-list) lan_list ;;
+	lan-save)
+		TEMP_FILES="$TEMP_FILES /tmp/terryclash-lan-proxy.txt /tmp/terryclash-lan-direct.txt"
+		save_lan ;;
+	probe-list) probe_list ;;
+	probe-add)
+		name=${2:-}; url=${3:-}
+		[ -n "$name" ] && [ "$(printf '%s' "$name" | wc -c)" -le 64 ] || fail '站点名称需在 64 字节以内'
+		[ "$(printf '%s' "$url" | wc -c)" -le 255 ] || fail 'URL 不能超过 255 字节'
+		case "$url" in https://*|http://*) ;; *) fail '仅支持 HTTP(S) 地址';; esac
+		case "$url" in *' '*|*'\n'*|*'@'*) fail 'URL 含有不支持的字符';; esac
+		ensure_probes
+		id=$(new_section probe)
+		uci set "terryclash.$id.name=$name"
+		uci set "terryclash.$id.url=$url"
+		uci commit terryclash
+		ok '站点已添加' ;;
+	probe-delete)
+		id=${2:-}; valid_id "$id" || fail '无效站点 ID'
+		ensure_probes
+		[ "$(uci -q get "terryclash.$id" || true)" = probe ] || fail '站点不存在'
+		uci delete "terryclash.$id"; uci commit terryclash
+		ok '站点已删除' ;;
+	probe-check) probe_check "${2:-}" ;;
+	bypass-save)
+		TEMP_FILES="$TEMP_FILES /tmp/terryclash-bypass-list.txt"
+		save_bypass /tmp/terryclash-bypass-list.txt ;;
+	bypass-import)
+		TEMP_FILES="$TEMP_FILES /tmp/terryclash-bypass-import.yaml"
+		[ -s /tmp/terryclash-bypass-import.yaml ] || fail '请选择本机 Clash YAML 配置'
+		[ "$(wc -c < /tmp/terryclash-bypass-import.yaml)" -le 4194304 ] || fail '配置文件不能超过 4 MiB'
+		yq -e '.proxies | tag == "!!seq"' /tmp/terryclash-bypass-import.yaml >/dev/null 2>&1 || fail '配置中没有 proxies 节点列表'
+		candidate=$(mktemp /tmp/terryclash-bypass-import-list.XXXXXX)
+		TEMP_FILES="$TEMP_FILES $candidate"
+		yq -r '.proxies[]?.server' /tmp/terryclash-bypass-import.yaml | while IFS= read -r address; do
+			case "$address" in
+				*[!0-9.]*|'') ;;
+				*) printf '%s\n' "$address" ;;
+			esac
+			case "$address" in
+				*:*) printf '%s\n' "$address" ;;
+			esac
+		done > "$candidate"
+		[ -s "$candidate" ] || fail '配置中没有可导入的 IP 节点'
+		save_bypass "$candidate" ;;
+	script-save)
+		case "${2:-}" in 0|1) ;; *) fail '无效开关';; esac
+		[ -s /tmp/terryclash-script.js ] || fail '脚本不能为空'
+		timeout 10 qjs --memory-limit 33554432 -m /usr/libexec/terryclash-script.mjs /tmp/terryclash-script.js > /tmp/terryclash-script.log 2>&1 || fail "脚本语法错误: $(tail -c 800 /tmp/terryclash-script.log)"
+		begin_change
+		SCRIPT_BACKUP=$(mktemp "$ROOT/.script-backup.XXXXXX")
+		[ ! -f "$ROOT/global.js" ] || cp "$ROOT/global.js" "$SCRIPT_BACKUP"
+		cp /tmp/terryclash-script.js "$ROOT/global.js"
+		uci set "terryclash.main.script_enabled=$2"; uci commit terryclash
+		active=$(uci -q get terryclash.main.active || true)
+		[ -z "$active" ] || apply_source "$SUBS/$active.yaml"
+		rm -f "$SCRIPT_BACKUP"; SCRIPT_BACKUP=; end_change
+		ok '全局脚本已保存并应用' ;;
+	list) list_subscriptions ;;
+	add)
+		name=${2:-}; url=${3:-}
+		[ -n "$name" ] || fail '请输入名称'
+		case "$url" in https://*|http://*) ;; *) fail '订阅地址必须是 HTTP(S)';; esac
+		id=$(new_section subscription)
+		uci set "terryclash.$id.name=$name"; uci set "terryclash.$id.url=$url"; uci commit terryclash
+		json_init; json_add_boolean ok 1; json_add_string id "$id"; json_dump ;;
+	delete)
+		id=${2:-}; valid_id "$id" || fail '无效 ID'
+		[ "$(uci -q get terryclash.main.active)" != "$id" ] || fail '请先切换当前订阅'
+		uci -q delete "terryclash.$id" || fail '订阅不存在'; uci commit terryclash
+		rm -f "$SUBS/$id.yaml"; ok '订阅已删除' ;;
+	update) update_subscription "${2:-}" ;;
+	import)
+		name=${2:-}; [ -n "$name" ] || fail '请输入名称'
+		[ -s /tmp/terryclash-import.yaml ] || fail '上传文件不存在'
+		candidate=$(mktemp "$ROOT/.check.XXXXXX")
+		TEMP_FILES="$TEMP_FILES $candidate"
+		build /tmp/terryclash-import.yaml "$candidate"
+		id=$(new_section subscription)
+		uci set "terryclash.$id.name=$name"; uci set "terryclash.$id.url="; uci commit terryclash
+		cp /tmp/terryclash-import.yaml "$SUBS/$id.yaml"
+		rm -f /tmp/terryclash-import.yaml
+		json_init; json_add_boolean ok 1; json_add_string id "$id"; json_dump ;;
+	activate)
+		id=${2:-}; valid_id "$id" || fail '无效 ID'; [ -s "$SUBS/$id.yaml" ] || fail '订阅文件不存在'
+		apply_source "$SUBS/$id.yaml"
+		uci set "terryclash.main.active=$id"; uci commit terryclash
+		ok '配置已切换' ;;
+	proxies) api /proxies ;;
+	connections) api /connections ;;
+	config) api /configs ;;
+	rules) rules_json ;;
+	custom-rules) list_custom_rules ;;
+	rule-add)
+		check_rule "${2:-}" "${3:-}" "${4:-}"
+		begin_change
+		id=$(new_section rule)
+		uci set "terryclash.$id.type=$2"; uci set "terryclash.$id.value=$3"; uci set "terryclash.$id.target=$4"; uci commit terryclash
+		apply_source "$SUBS/$(uci -q get terryclash.main.active).yaml"
+		end_change
+		json_init; json_add_boolean ok 1; json_add_string id "$id"; json_dump ;;
+	rule-delete)
+		id=${2:-}; valid_id "$id" || fail '无效 ID'
+		[ "$(uci -q get "terryclash.$id" || true)" = rule ] || fail '规则不存在'
+		begin_change
+		uci -q delete "terryclash.$id" || fail '规则不存在'; uci commit terryclash
+		apply_source "$SUBS/$(uci -q get terryclash.main.active).yaml"; end_change; ok '规则已删除' ;;
+	rule-target)
+		id=${2:-}; valid_id "$id" || fail '无效 ID'
+		[ "$(uci -q get "terryclash.$id" || true)" = rule ] || fail '规则不存在'
+		type=$(uci -q get "terryclash.$id.type") || fail '规则不存在'
+		value=$(uci -q get "terryclash.$id.value")
+		check_rule "$type" "$value" "${3:-}"
+		begin_change
+		uci set "terryclash.$id.target=$3"; uci commit terryclash
+		apply_source "$SUBS/$(uci -q get terryclash.main.active).yaml"; end_change; ok '规则目标已更新' ;;
+	rule-move)
+		id=${2:-}; valid_id "$id" || fail '无效 ID'
+		[ "$(uci -q get "terryclash.$id" || true)" = rule ] || fail '规则不存在'
+		case "${3:-}" in up|down) ;; *) fail '无效方向';; esac
+		begin_change
+		order=$(uci -X show terryclash | grep '=rule$' | cut -d. -f2 | cut -d= -f1)
+		prev=''; found=''; next=''
+		for entry in $order; do
+			if [ "$entry" = "$id" ]; then found=1; continue; fi
+			if [ -z "$found" ]; then prev=$entry; else next=$entry; break; fi
+		done
+		if [ "$3" = up ] && [ -n "$prev" ]; then uci reorder "terryclash.$id=$(section_index "$prev")"; fi
+		if [ "$3" = down ] && [ -n "$next" ]; then uci reorder "terryclash.$next=$(section_index "$id")"; fi
+		uci commit terryclash; apply_source "$SUBS/$(uci -q get terryclash.main.active).yaml"; end_change; ok '规则顺序已更新' ;;
+	select)
+		group=${2:-}; node=${3:-}; [ -n "$group" ] && [ -n "$node" ] || fail '缺少策略组或节点'
+		json_init; json_add_string name "$node"; body=$(json_dump)
+		http_put "/proxies/$(urlencode "$group")" "$body" || fail '切换节点失败'
+	ok '节点已切换' ;;
+	delay)
+		[ -n "${2:-}" ] || fail '缺少节点名称'
+		api "/proxies/$(urlencode "$2")/delay?url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&timeout=5000" ;;
+	set-interval)
+		case "${2:-}" in *[!0-9]*|'') fail '无效间隔';; esac
+		[ "$2" -ge 1 ] && [ "$2" -le 168 ] || fail '间隔需为 1–168 小时'
+		uci set "terryclash.main.update_interval=$2"; uci commit terryclash; ok '更新间隔已保存' ;;
+	auto-update)
+		interval=$(uci -q get terryclash.main.update_interval || echo 24)
+		now=$(date +%s)
+		config_load terryclash
+		config_foreach auto_one subscription
+		;;
+	*) fail '未知命令' ;;
+esac

@@ -1,0 +1,54 @@
+{
+  "admin/services/terryclash": {
+    "title": "TerryClash",
+    "order": 30,
+    "action": {
+      "type": "firstchild"
+    },
+    "depends": {
+      "acl": [
+        "luci-app-terryclash"
+      ]
+    }
+  },
+  "admin/services/terryclash/subscriptions": {
+    "title": "订阅",
+    "order": 20,
+    "action": {
+      "type": "view",
+      "path": "terryclash/subscriptions_r14"
+    }
+  },
+  "admin/services/terryclash/home": {
+    "title": "首页",
+    "order": 10,
+    "action": {
+      "type": "view",
+      "path": "terryclash/home_r12"
+    }
+  },
+  "admin/services/terryclash/proxies": {
+    "title": "代理",
+    "order": 30,
+    "action": {
+      "type": "view",
+      "path": "terryclash/proxies_r12"
+    }
+  },
+  "admin/services/terryclash/rules": {
+    "title": "规则",
+    "order": 40,
+    "action": {
+      "type": "view",
+      "path": "terryclash/rules_r12"
+    }
+  },
+  "admin/services/terryclash/lan": {
+    "title": "分流",
+    "order": 50,
+    "action": {
+      "type": "view",
+      "path": "terryclash/lan_r16"
+    }
+  }
+}

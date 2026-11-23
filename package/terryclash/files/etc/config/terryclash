@@ -1,0 +1,6 @@
+config terryclash 'main'
+	option enabled '0'
+	option active ''
+	option update_interval '24'
+	option mode 'rule'
+	option lan_device 'br-lan'
