@@ -87,6 +87,33 @@ def prepare(source: Path) -> None:
     }
 ''',
     )
+    replace_once(
+        source / "src/peer.rs",
+        'pub(crate) const UDP_ATTEMPT: Duration = Duration::from_secs(14);',
+        'pub(crate) const UDP_ATTEMPT: Duration = Duration::from_secs(if cfg!(feature = "router-headless") { 30 } else { 14 });',
+    )
+    replace_once(
+        source / "src/peer.rs",
+        '''        let start_at = (last_direct_start
+            .unwrap_or(self.received_at)
+            .max(self.received_at)
+            + DIRECT_HEAD_START)
+            .min(self.received_at + MAX_RELAY_WAIT);''',
+        '''        let head_start = if cfg!(feature = "router-headless") {
+            std::env::var("OPENRAD_P2P_GRACE_SECS").ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|seconds| (4..=25).contains(seconds))
+                .map(Duration::from_secs)
+                .unwrap_or(DIRECT_HEAD_START)
+        } else {
+            DIRECT_HEAD_START
+        };
+        let start_at = (last_direct_start
+            .unwrap_or(self.received_at)
+            .max(self.received_at)
+            + head_start)
+            .min(self.received_at + MAX_RELAY_WAIT.max(head_start));''',
+    )
     print(f"Prepared OpenRad router CLI; upstream {UPSTREAM_COMMIT}")
 
 
