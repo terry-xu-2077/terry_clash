@@ -4,12 +4,27 @@ from pathlib import Path
 
 
 def apply(source: Path, replace_once) -> None:
+    replace_once(
+        source / "Cargo.toml",
+        "[target.'cfg(windows)'.dependencies]\n",
+        "[target.'cfg(unix)'.dependencies]\nsocket2 = { version = \"0.6\", features = [\"all\"] }\n\n[target.'cfg(windows)'.dependencies]\n",
+    )
     session = source / "src/session.rs"
     replace_once(
         session,
         '''    pub fn connect_with_stop(
 ''',
-        '''    pub(crate) fn connect_bound(
+        '''    pub(crate) fn listen_shared(port: u16) -> Result<std::net::TcpListener> {
+        let socket = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::STREAM, None)?;
+        socket.set_only_v6(false)?;
+        socket.set_reuse_address(true)?;
+        #[cfg(target_os = "linux")]
+        socket.set_reuse_port(true)?;
+        socket.bind(&std::net::SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), port).into())?;
+        socket.listen(8)?;
+        Ok(socket.into())
+    }
+    pub(crate) fn connect_bound(
         address: &std::net::SocketAddr,
         local_port: u16,
         duration: Duration,
@@ -56,6 +71,11 @@ fn connect_socket_from_port(
                 (&enabled as *const libc::c_int).cast(), std::mem::size_of_val(&enabled) as _)
         };
         ensure!(rc == 0, "TCP SO_REUSEADDR: {}", io::Error::last_os_error());
+        let rc = unsafe {
+            libc::setsockopt(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_REUSEPORT,
+                (&enabled as *const libc::c_int).cast(), std::mem::size_of_val(&enabled) as _)
+        };
+        ensure!(rc == 0, "TCP SO_REUSEPORT: {}", io::Error::last_os_error());
     }
     if let Some(port) = local_port {
         ensure!(port >= 1024, "invalid rendezvous source port");
@@ -112,7 +132,7 @@ fn connect_socket_from_port(
                         if !force_relay {''',
         '''                        pending = Some((cid, password));
                         if !force_relay && cfg!(all(feature = "router-headless", target_os = "linux")) {
-                            let listener = std::net::TcpListener::bind((std::net::Ipv6Addr::UNSPECIFIED, rendezvous_port))?;
+                            let listener = Framed::listen_shared(rendezvous_port)?;
                             listener.set_nonblocking(true)?;
                             let addresses = crate::udp::local_candidates(route_ip, rendezvous_port)?;
                             coord.send(&advertise_tcp(cid, &addresses)?)?;
