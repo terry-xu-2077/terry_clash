@@ -4,7 +4,7 @@ ImmortalWrt 25.12.2 x86_64 上的 Mihomo 代理管理器。LuCI 原生 JS 提供
 
 源码仓库：[terry-xu-2077/terry_clash](https://github.com/terry-xu-2077/terry_clash)。已编译安装包与校验文件见 [Releases](https://github.com/terry-xu-2077/terry_clash/releases)。
 
-OpenRad 路由器多实例与局域网地址映射方案见 [OPENRAD_ROUTER_PLAN.md](OPENRAD_ROUTER_PLAN.md)，目前仅为计划，尚未实现或包含在安装包中。
+OpenRad 路由器方案见 [OPENRAD_ROUTER_PLAN.md](OPENRAD_ROUTER_PLAN.md)。[单实例最小实现](openrad/mvp/README.md)已在路由器验证注册、加入私有网络、认证成员连接、ICMP 往返及绕过 TerryClash；[测试记录](openrad/mvp/TEST_RESULTS.md)列明验证范围。多主机地址映射尚未实现，OpenRad 不包含在 r17 安装包中。
 
 ## 已核实目标设备
 

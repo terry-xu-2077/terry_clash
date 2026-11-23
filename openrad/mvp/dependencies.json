@@ -1,0 +1,66 @@
+{
+  "distribution": "ImmortalWrt 25.12.2 x86_64",
+  "kernel_abi": "6.12.103-1-0413601b1c3f0490e17f340fe09229ea",
+  "packages": [
+    {
+      "name": "ip-full-6.18.0-r2.apk",
+      "sha256": "ccb056ae416635ceeedec2bf1d137c1b9a181069f818e0f1404547e8e16ad22d",
+      "index_metadata_sha256": "6d23451b0f20a3042d6cf56f2d8e670c1c87347bf78bda234fb81fb841eed6ff"
+    },
+    {
+      "name": "kmod-tun-6.12.103-r1.apk",
+      "sha256": "2c0cb2cc512ee813ee755a8291a40d2631d2b1a10ea0ec6c48d0f5183067c719",
+      "index_metadata_sha256": "01a0817f5c210addf8998a39546c9d79cccca974a9bdbd28d7825fba1657686f"
+    },
+    {
+      "name": "kmod-veth-6.12.103-r1.apk",
+      "sha256": "399e1c944209e7488fd78f49877cdb5cb9ca33fd507f861b057f1fbd6d414ee2",
+      "index_metadata_sha256": "22886a8adb71700f84e3248c97527149013cdd3271193f0ae393f6e825aa0e31"
+    },
+    {
+      "name": "libbpf1-1.6.2-r1.apk",
+      "sha256": "60511f7f251599c0c27246aaa3c2cc46f267d52dd76070195eb9f707124f1699",
+      "index_metadata_sha256": "e1a2a160ffc7e615b46284f77a04c77748f10fadca9ab2d8c9a5e77dbb422d4c"
+    },
+    {
+      "name": "libelf1-0.192-r1.apk",
+      "sha256": "cae00328d3b417d9b640f0a24f17d1f7b72f40b39d8a47a8a33141267c3e7a34",
+      "index_metadata_sha256": "69fec19e4156633f9298a0d3d4862ae96a79817ae077054b7df1f44ce46f6011"
+    },
+    {
+      "name": "libpcap1-1.10.6-r1.apk",
+      "sha256": "d936c836fd8406631c69b4e7e9ab3854263b7f5771344e58e3fc650c196c53de",
+      "index_metadata_sha256": "b9dab57322e6acdfd3a9f072a1fb55e00296efdfc4d60171a0f7586638b71e7a"
+    },
+    {
+      "name": "shadow-common-4.19.4-r2.apk",
+      "sha256": "335b35bc53cf5ad2bcafe804b09f0c4e35bbc7f7ff0c590fd0eb9bc7a32967b9",
+      "index_metadata_sha256": "2f5a4dad9671d7e0213f531c9fef25ec2139c0d6e9653a263f20783f4d085745"
+    },
+    {
+      "name": "shadow-groupadd-4.19.4-r2.apk",
+      "sha256": "52b3a5d04935d475b5d7517a717d98ad4be39593e4ee50aa5af6c439c76c641b",
+      "index_metadata_sha256": "5e6f9d3dc2c977f636d4373e1a3fd1046860066e639805773d4327f80732379b"
+    },
+    {
+      "name": "shadow-su-4.19.4-r2.apk",
+      "sha256": "b40cf06daa527234ad47e981d11f7dee3adb586f8826b86cb168e886cf5c717b",
+      "index_metadata_sha256": "ea44f09dcceb34d7232736b492bb75706e158a1dfca1bb57f19f19cd634562b4"
+    },
+    {
+      "name": "shadow-useradd-4.19.4-r2.apk",
+      "sha256": "4c388dea65a0fda20d02b393dd7b789359b048e720ecdc9c1b1dc2b4d34bb0c0",
+      "index_metadata_sha256": "9a72e98e41a08219793ab24c19de5ea6228cdb656db01016cf84ec6dd3da9db2"
+    },
+    {
+      "name": "sudo-1.9.17_p2-r1.apk",
+      "sha256": "71738d48d0de7015a5354bb2dab8e25b7b1ba3f724c48b5c73835f45d1b1072a",
+      "index_metadata_sha256": "d834b49497171b3a55413b1481e59ebd918ff1d413193a1bca5d2fc82e63bd36"
+    },
+    {
+      "name": "tcpdump-mini-4.99.6-r1.apk",
+      "sha256": "53b7a626227a42c46342555566abb83f9e6a1f625bb9000f848ce8fdb7b0ae12",
+      "index_metadata_sha256": "460d0f3f33de13b82379e787b7e180f5122213bbce6047ece653bf7d599b6ca0"
+    }
+  ]
+}
