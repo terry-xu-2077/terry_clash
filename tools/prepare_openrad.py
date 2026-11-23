@@ -2,6 +2,7 @@
 
 import argparse
 from pathlib import Path
+from openrad_p2p_patch import apply as apply_p2p
 
 UPSTREAM_COMMIT = "c7111577ffdfb4ab48ef4ba108ddbcf3ca07795c"
 
@@ -114,6 +115,7 @@ def prepare(source: Path) -> None:
             + head_start)
             .min(self.received_at + MAX_RELAY_WAIT.max(head_start));''',
     )
+    apply_p2p(source, replace_once)
     print(f"Prepared OpenRad router CLI; upstream {UPSTREAM_COMMIT}")
 
 
