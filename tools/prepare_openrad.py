@@ -59,6 +59,34 @@ def prepare(source: Path) -> None:
         for before, after in replacements.items():
             text = text.replace(before, after)
         path.write_text(text, encoding="utf-8", newline="\n")
+    replace_once(
+        source / "src/udp.rs",
+        'pub(crate) fn bind_dual_stack() -> std::io::Result<UdpSocket> {\n',
+        '''pub(crate) fn bind_dual_stack() -> std::io::Result<UdpSocket> {
+    // Optional bounded port pool for explicit router/NAT port forwarding.
+    // Ordinary upstream builds retain ephemeral ports.
+    #[cfg(all(feature = "router-headless", target_os = "linux"))]
+    if let Some(value) = std::env::var_os("OPENRAD_UDP_PORT_RANGE") {
+        use std::io::{Error, ErrorKind};
+        let invalid = || Error::new(ErrorKind::InvalidInput, "invalid OPENRAD_UDP_PORT_RANGE");
+        let value = value.to_str().ok_or_else(invalid)?;
+        let (first, last) = value.split_once('-').ok_or_else(invalid)?;
+        let first: u16 = first.parse().map_err(|_| invalid())?;
+        let last: u16 = last.parse().map_err(|_| invalid())?;
+        if first < 1024 || last < first || last - first >= 64 {
+            return Err(invalid());
+        }
+        for port in first..=last {
+            match UdpSocket::bind((std::net::Ipv6Addr::UNSPECIFIED, port)) {
+                Ok(socket) => return Ok(socket),
+                Err(error) if error.kind() == ErrorKind::AddrInUse => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        return Err(Error::new(ErrorKind::AddrInUse, "OpenRad UDP port pool exhausted"));
+    }
+''',
+    )
     print(f"Prepared OpenRad router CLI; upstream {UPSTREAM_COMMIT}")
 
 
