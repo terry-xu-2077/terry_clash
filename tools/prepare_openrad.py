@@ -28,6 +28,34 @@ def prepare(source: Path) -> None:
         '                source.is_some()\n            )?,',
         '                source.is_some() || cfg!(feature = "router-headless")\n            )?,',
     )
+    # musl uses narrower msghdr/cmsghdr length members than glibc. The buffers
+    # here contain a small, bounded number of descriptors; infer field types on
+    # assignment and use usize for pointer arithmetic after receiving them.
+    replacements = {
+        "msg.msg_controllen = std::mem::size_of_val(&control);":
+            "msg.msg_controllen = std::mem::size_of_val(&control) as _;",
+        "msg.msg_controllen = libc::CMSG_SPACE(fd_size) as usize;":
+            "msg.msg_controllen = libc::CMSG_SPACE(fd_size) as _;",
+        "(*c).cmsg_len = libc::CMSG_LEN(fd_size) as usize;":
+            "(*c).cmsg_len = libc::CMSG_LEN(fd_size) as _;",
+        "unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize;":
+            "unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as _;",
+        "libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as usize;":
+            "libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as _;",
+        "(*c).cmsg_len.saturating_sub(libc::CMSG_LEN(0) as usize)":
+            "((*c).cmsg_len as usize).saturating_sub(libc::CMSG_LEN(0) as usize)",
+        "message.msg_iovlen = parts.len();":
+            "message.msg_iovlen = parts.len() as _;",
+        "msg.msg_controllen = size;": "msg.msg_controllen = size as _;",
+        "libc::CMSG_LEN((count * std::mem::size_of::<RawFd>()) as u32) as usize;":
+            "libc::CMSG_LEN((count * std::mem::size_of::<RawFd>()) as u32) as _;",
+    }
+    for rel in ("src/daemon.rs", "src/platform/linux.rs", "src/udp.rs"):
+        path = source / rel
+        text = path.read_text(encoding="utf-8")
+        for before, after in replacements.items():
+            text = text.replace(before, after)
+        path.write_text(text, encoding="utf-8", newline="\n")
     print(f"Prepared OpenRad router CLI; upstream {UPSTREAM_COMMIT}")
 
 
