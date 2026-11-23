@@ -1,0 +1,47 @@
+name: Build OpenRad router MVP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install musl compiler
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --target x86_64-unknown-linux-musl
+      - name: Fetch pinned OpenRad source
+        run: |
+          git init upstream
+          git -C upstream remote add origin https://github.com/gringoestrangeiro/openrad.git
+          git -C upstream fetch --depth 1 origin c7111577ffdfb4ab48ef4ba108ddbcf3ca07795c
+          git -C upstream checkout --detach FETCH_HEAD
+          test "$(git -C upstream rev-parse HEAD)" = c7111577ffdfb4ab48ef4ba108ddbcf3ca07795c
+          python3 tools/prepare_openrad.py upstream
+      - name: Test CLI and build static router binary
+        working-directory: upstream
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: |
+          cargo +1.95.0 test --locked -p openrad-client --bin openrad --features router-headless
+          cargo +1.95.0 build --release --locked -p openrad-client --bin openrad --features router-headless --target x86_64-unknown-linux-musl
+          file target/x86_64-unknown-linux-musl/release/openrad
+          ! readelf -l target/x86_64-unknown-linux-musl/release/openrad | grep -q INTERP
+          mkdir -p ../openrad-artifact
+          cp target/x86_64-unknown-linux-musl/release/openrad ../openrad-artifact/
+          cp LICENSE ../openrad-artifact/OpenRad-LICENSE
+          printf '%s\n' c7111577ffdfb4ab48ef4ba108ddbcf3ca07795c > ../openrad-artifact/UPSTREAM_COMMIT
+          cd ../openrad-artifact
+          sha256sum openrad > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openrad-2.4.5-router-x86_64-musl
+          path: openrad-artifact/
+          if-no-files-found: error
