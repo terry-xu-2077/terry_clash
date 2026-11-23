@@ -9,15 +9,18 @@ COMMENT=openrad-mvp
 IP=/usr/bin/ip
 
 remove_rules() {
-    for spec in 'fw4 forward' 'dnsmasq prerouting' 'terryclash tcp_prerouting' 'terryclash udp_prerouting' 'terryclash ipv6_prerouting'; do
+    for spec in 'fw4 input' 'fw4 forward' 'dnsmasq prerouting' 'terryclash tcp_prerouting' 'terryclash udp_prerouting' 'terryclash ipv6_prerouting'; do
         set -- $spec
         nft -a list chain inet "$1" "$2" 2>/dev/null |
-            awk '/comment "openrad-mvp"/ {print $NF}' |
+            awk '/comment "openrad-mvp(-host|-p2p)?"/ {print $NF}' |
             while read -r handle; do nft delete rule inet "$1" "$2" handle "$handle"; done
     done
 }
 
 down() {
+    if [ -f "$STATE/host-network" ]; then
+        /etc/init.d/openrad-mvp stop 2>/dev/null || true
+    fi
     # Also stop the unprivileged instance before removing its namespace.
     if "$IP" netns list | grep -Eq "^$NS([[:space:]]|$)"; then
         for pid in $("$IP" netns pids "$NS"); do kill "$pid" 2>/dev/null || true; done
@@ -25,12 +28,16 @@ down() {
         for pid in $("$IP" netns pids "$NS"); do kill -KILL "$pid" 2>/dev/null || true; done
     fi
     remove_rules
+    nft flush chain inet fw4 openrad_mvp_output 2>/dev/null || true
+    nft delete chain inet fw4 openrad_mvp_output 2>/dev/null || true
+    nft delete set inet fw4 openrad_mvp_tcp_ports 2>/dev/null || true
     nft delete table inet openrad_mvp 2>/dev/null || true
+    nft delete table inet openrad_mvp_host 2>/dev/null || true
     "$IP" link del "$HOST" 2>/dev/null || true
     "$IP" netns del "$NS" 2>/dev/null || true
     rm -f /etc/netns/or-mvp/resolv.conf
     rmdir /etc/netns/or-mvp 2>/dev/null || true
-    rm -f "$STATE/active" "$STATE/retain"
+    rm -f "$STATE/active" "$STATE/retain" "$STATE/host-network"
     if [ -r "$STATE/watchdog.pid" ]; then
         watchpid=$(cat "$STATE/watchdog.pid")
         case "$watchpid" in

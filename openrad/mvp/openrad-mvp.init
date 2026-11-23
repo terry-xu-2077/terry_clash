@@ -6,8 +6,13 @@ STOP=10
 start_service() {
     [ -f /tmp/openrad-mvp/active ] || return 1
     procd_open_instance
-    procd_set_param command /usr/bin/ip netns exec or-mvp /usr/bin/sudo -H --preserve-env=OPENRAD_LOG_DIR -u openrad /usr/libexec/openrad-mvp/openrad --data-dir /etc/openrad-mvp/profile __daemon
-    procd_set_param env OPENRAD_LOG_DIR=/tmp/openrad-mvp-logs
+    if [ -f /tmp/openrad-mvp/host-network ]; then
+        # Keep the private resolver mount while moving sockets into the host WAN.
+        procd_set_param command /usr/bin/ip netns exec or-mvp /usr/bin/nsenter --net=/proc/1/ns/net /usr/bin/sudo -H --preserve-env=OPENRAD_LOG_DIR,OPENRAD_UDP_PORT_RANGE,OPENRAD_P2P_GRACE_SECS,OPENRAD_PASSIVE_SECONDS -u openrad /usr/libexec/openrad-mvp/openrad --data-dir /etc/openrad-mvp/profile __daemon
+    else
+        procd_set_param command /usr/bin/ip netns exec or-mvp /usr/bin/sudo -H --preserve-env=OPENRAD_LOG_DIR,OPENRAD_UDP_PORT_RANGE,OPENRAD_P2P_GRACE_SECS,OPENRAD_PASSIVE_SECONDS -u openrad /usr/libexec/openrad-mvp/openrad --data-dir /etc/openrad-mvp/profile __daemon
+    fi
+    procd_set_param env OPENRAD_LOG_DIR=/tmp/openrad-mvp-logs OPENRAD_UDP_PORT_RANGE=40000-40015 OPENRAD_P2P_GRACE_SECS=20 OPENRAD_PASSIVE_SECONDS=45
     procd_set_param limits core="0 0" nofile="8192 8192" as="402653184 402653184"
     procd_set_param nice 10
     procd_set_param stdout 0
